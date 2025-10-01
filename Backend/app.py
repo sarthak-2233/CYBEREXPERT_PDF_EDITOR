@@ -67,7 +67,7 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 300 * 1024 * 1024  # 300MB max file size
 
 # OpenAI API Key (keep this secure - use environment variable)
-OPENAI_API_KEY = '***REMOVED***proj-_RqEN7sbLE5HhFYlptx1tsdXVxnuBknE4I746i-cJSrcrrXfqMzOcGKlMFq3t98gEFRh4pZ3WyT3BlbkFJGLjYx71M9TmWM3vjNBf81YNmr_dhW_XRlpwzV90mz2kqtJ6C0bfv1uowjanSFWgzovVzLjulAA'
+OPENAI_API_KEY = ''
 
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
