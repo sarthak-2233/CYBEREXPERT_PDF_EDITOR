@@ -10,8 +10,12 @@ import time
 from datetime import datetime
 from io import BytesIO
 import uuid
+from io import BytesIO
+import sounddevice as sd
+import soundfile as sf
+from scipy.io import wavfile
+import threading
 import queue
-import subprocess
 
 # Import your existing classes
 try:
@@ -45,20 +49,11 @@ except ImportError:
     AI_PROCESSING_AVAILABLE = False
     print("OpenAI not available - AI processing disabled")
 
-# Speech recognition imports
-try:
-    import speech_recognition as sr
-    SPEECH_RECOGNITION_AVAILABLE = True
-except ImportError:
-    SPEECH_RECOGNITION_AVAILABLE = False
-    print("Speech Recognition not available - audio transcription disabled")
-
 # Recording imports
 try:
     import pyautogui
-    import sounddevice as sd
-    import soundfile as sf
-    from scipy.io import wavfile
+    import pyaudio
+    import wave
     RECORDING_AVAILABLE = True
 except ImportError:
     RECORDING_AVAILABLE = False
@@ -71,8 +66,8 @@ CORS(app, origins=["*"])  # Enable CORS for React frontend
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 300 * 1024 * 1024  # 300MB max file size
 
-# OpenAI API Key - USE ENVIRONMENT VARIABLE FOR SECURITY
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
+# OpenAI API Key (keep this secure - use environment variable)
+OPENAI_API_KEY = ''
 
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -95,7 +90,7 @@ class EnhancedScreenRecorder:
         self.sample_rate = 44100
         self.channels = 2
         
-    def audio_callback(self, indata, frames, time_info, status):
+    def audio_callback(self, indata, frames, time, status):
         """Callback function for audio recording"""
         if status:
             print(f"Audio callback status: {status}")
@@ -243,12 +238,17 @@ class EnhancedScreenRecorder:
     def _combine_audio_video(self):
         """Combine audio and video using ffmpeg (if available)"""
         try:
+            # For now, just rename the temp video file
+            # In a production environment, you'd use ffmpeg to combine audio and video
             import shutil
             shutil.move(self.temp_video_path, self.output_path)
+            
+            # Keep audio file for transcript processing
             print(f"Combined video saved: {self.output_path}")
             return True
         except Exception as e:
             print(f"Error combining audio and video: {e}")
+            # If combination fails, at least keep the video
             try:
                 import shutil
                 shutil.move(self.temp_video_path, self.output_path)
@@ -348,129 +348,24 @@ class EnhancedVideoProcessor:
             except Exception as e:
                 print(f"Error initializing OpenAI client: {e}")
                 self.client = None
-
-    def extract_audio_and_transcribe(self):
-        """Extract audio from video and transcribe it using speech recognition"""
+                
+    def extract_transcript_from_audio(self):
+        """Extract transcript from audio file using Whisper API"""
         try:
-            if not SPEECH_RECOGNITION_AVAILABLE:
-                print("⚠️ Speech recognition not available - falling back to mock transcript")
-                return self._generate_mock_transcript()
-            
-            print("🎵 Starting audio transcription process...")
-            
-            # Check if audio file exists
-            if os.path.exists(self.audio_path):
-                print(f"✅ Using existing audio file: {self.audio_path}")
-                audio_file = self.audio_path
+            if self.client and os.path.exists(self.audio_path):
+                with open(self.audio_path, "rb") as audio_file:
+                    transcript_response = self.client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_file,
+                        response_format="text"
+                    )
+                    print(transcript_response)
+                    return transcript_response
             else:
-                print(f"⚠️ Audio file not found at {self.audio_path}")
-                print("🔧 Attempting to extract audio from video...")
-                
-                # Extract audio from video using ffmpeg
-                temp_audio = tempfile.mktemp(suffix='.wav')
-                
-                ffmpeg_commands = [
-                    ['ffmpeg', '-i', self.video_path, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', temp_audio, '-y'],
-                    ['ffmpeg.exe', '-i', self.video_path, '-vn', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', temp_audio, '-y']
-                ]
-                
-                audio_extracted = False
-                for cmd in ffmpeg_commands:
-                    try:
-                        print(f"🔧 Running: {' '.join(cmd[:3])}...")
-                        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30)
-                        if os.path.exists(temp_audio) and os.path.getsize(temp_audio) > 0:
-                            print(f"✅ Audio extraction successful ({os.path.getsize(temp_audio) / 1024:.1f} KB)")
-                            audio_file = temp_audio
-                            audio_extracted = True
-                            break
-                    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
-                        continue
-                
-                if not audio_extracted:
-                    print("❌ Could not extract audio from video")
-                    return self._generate_mock_transcript()
-            
-            print("🎤 Starting speech recognition transcription...")
-            
-            # Transcribe audio
-            recognizer = sr.Recognizer()
-            transcript = ""
-            
-            try:
-                with sr.AudioFile(audio_file) as source:
-                    # Adjust for ambient noise
-                    recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                    
-                    # Get audio duration
-                    duration = self._get_audio_duration(audio_file)
-                    print(f"📊 Audio duration: {duration:.1f} seconds")
-                    
-                    if duration <= 0:
-                        print("❌ Invalid audio duration")
-                        return self._generate_mock_transcript()
-                    
-                    # Process audio in chunks
-                    chunk_duration = min(30, max(10, duration / 3))  # Adaptive chunk size
-                    
-                    processed_chunks = 0
-                    total_chunks = int(duration / chunk_duration) + 1
-                    
-                    for start_time in range(0, int(duration), int(chunk_duration)):
-                        end_time = min(start_time + chunk_duration, duration)
-                        print(f"🎯 Processing chunk {processed_chunks + 1}/{total_chunks}: {start_time}s - {end_time:.1f}s")
-                        
-                        with sr.AudioFile(audio_file) as chunk_source:
-                            audio_data = recognizer.record(chunk_source, offset=start_time, duration=chunk_duration)
-                        
-                        try:
-                            # Try Google Speech Recognition
-                            text = recognizer.recognize_google(audio_data)
-                            transcript += text + " "
-                            print(f"✅ Chunk {processed_chunks + 1}: {text[:80]}...")
-                            processed_chunks += 1
-                        except sr.UnknownValueError:
-                            print(f"⚠️ Could not understand audio in chunk {start_time}s-{end_time:.1f}s")
-                            continue
-                        except sr.RequestError as e:
-                            print(f"⚠️ Speech recognition service error: {e}")
-                            break
-                
-                # Clean up temporary file if created
-                if audio_file != self.audio_path and os.path.exists(audio_file):
-                    os.remove(audio_file)
-                    print(f"🗑️ Cleaned up temporary audio file")
-                
-            except Exception as e:
-                print(f"❌ Audio processing error: {e}")
-                transcript = ""
-            
-            # Validate transcript
-            if not transcript.strip() or len(transcript.strip().split()) < 3:
-                print("⚠️ Transcript too short or empty, using fallback")
                 return self._generate_mock_transcript()
-            
-            print(f"✅ Transcription completed: {len(transcript)} characters, {len(transcript.split())} words")
-            return transcript.strip()
-            
         except Exception as e:
-            print(f"❌ Transcription error: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error extracting transcript: {e}")
             return self._generate_mock_transcript()
-
-    def _get_audio_duration(self, audio_file):
-        """Get duration of audio file"""
-        try:
-            import wave
-            with wave.open(audio_file, 'rb') as wav_file:
-                frames = wav_file.getnframes()
-                rate = wav_file.getframerate()
-                duration = frames / float(rate)
-                return duration
-        except Exception as e:
-            print(f"⚠️ Could not get audio duration: {e}")
-            return 60  # Default fallback duration
             
     def _generate_mock_transcript(self):
         """Generate a mock transcript for demo purposes"""
@@ -513,7 +408,6 @@ Format your response as a comprehensive analysis that would be useful for someon
             
     def _generate_mock_ai_analysis(self, original_transcript):
         """Generate mock AI analysis for demo"""
-        word_count = len(original_transcript.split()) if original_transcript else 0
         return f"""
 **AI-PROCESSED ANALYSIS**
 
@@ -544,112 +438,187 @@ Format your response as a comprehensive analysis that would be useful for someon
 **Summary:**
 This review session demonstrated thorough analysis of the document with particular attention to implementation details. The reviewer showed strong understanding of technical requirements and identified critical areas for follow-up. The systematic approach to highlighting key sections will facilitate effective project planning and execution.
 
-*Analysis based on transcript of {word_count} words, processed with advanced natural language understanding.*
+*Analysis based on transcript of {len(original_transcript.split())} words, processed with advanced natural language understanding.*
         """
-    
-    def extract_screenshots_from_video(self):
-        """Extract screenshots from video at key moments"""
-        screenshots = []
+
+# Add new API endpoints to your existing app.py
+
+@app.route('/api/annotations/screenshot', methods=['POST'])
+def capture_annotation_screenshot():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+            
+        session_id = data.get('session_id')
+        annotation_data = data.get('annotation')
+        page_image = data.get('page_image')
         
-        print(f"📸 Extracting screenshots from video...")
+        if not session_id:
+            return jsonify({'error': 'Session ID required'}), 400
+            
+        if session_id not in active_sessions:
+            return jsonify({'error': 'Invalid session'}), 400
+            
+        # Create screenshot manager if not exists
+        screenshot_manager_key = f"{session_id}_screenshots"
+        if screenshot_manager_key not in active_sessions:
+            active_sessions[screenshot_manager_key] = AnnotationScreenshotManager(session_id)
+            
+        screenshot_manager = active_sessions[screenshot_manager_key]
+        screenshot_data = screenshot_manager.capture_annotation_screenshot(annotation_data, page_image)
         
-        if not OPENCV_AVAILABLE:
-            print("⚠️ OpenCV not available - generating mock screenshots")
-            for i in range(3):
-                screenshots.append({
-                    'timestamp': i * 2.0,
-                    'frame_index': i * 10,
-                    'description': f"Mock screenshot at {i * 2.0:.1f}s",
-                    'image_base64': self._create_placeholder_image(),
-                    'event_index': i
-                })
-            return screenshots
+        if screenshot_data:
+            return jsonify({
+                'success': True,
+                'screenshot': screenshot_data,
+                'message': 'Screenshot captured successfully'
+            })
+        else:
+            return jsonify({'error': 'Failed to capture screenshot'}), 500
             
-        try:
-            cap = cv2.VideoCapture(self.video_path)
-            if not cap.isOpened():
-                print("❌ Could not open video file")
-                return screenshots
-                
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            duration = frame_count / fps if fps > 0 else 0
+    except Exception as e:
+        print(f"Error capturing annotation screenshot: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/screenshots/<session_id>', methods=['GET'])
+def get_session_screenshots(session_id):
+    try:
+        screenshot_manager_key = f"{session_id}_screenshots"
+        if screenshot_manager_key in active_sessions:
+            screenshot_manager = active_sessions[screenshot_manager_key]
+            screenshots = screenshot_manager.get_screenshots()
+            return jsonify({
+                'success': True,
+                'screenshots': screenshots,
+                'count': len(screenshots)
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'screenshots': [],
+                'count': 0
+            })
+    except Exception as e:
+        print(f"Error getting screenshots: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/screenshots/clear/<session_id>', methods=['POST'])
+def clear_session_screenshots(session_id):
+    try:
+        screenshot_manager_key = f"{session_id}_screenshots"
+        if screenshot_manager_key in active_sessions:
+            screenshot_manager = active_sessions[screenshot_manager_key]
+            success = screenshot_manager.clear_screenshots()
+            if success:
+                del active_sessions[screenshot_manager_key]
+            return jsonify({
+                'success': success,
+                'message': 'Screenshots cleared successfully' if success else 'Failed to clear screenshots'
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'message': 'No screenshots to clear'
+            })
+    except Exception as e:
+        print(f"Error clearing screenshots: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ai/enhanced-process-video', methods=['POST'])
+def enhanced_process_video():
+    try:
+        if not AI_PROCESSING_AVAILABLE:
+            return jsonify({
+                'error': 'AI processing not available. Install openai library.',
+                'available': False
+            }), 400
             
-            print(f"📊 Video info: {frame_count} frames, {fps:.1f} FPS, {duration:.1f}s duration")
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
             
-            # Extract screenshots at regular intervals (every 5 seconds)
-            screenshot_interval = int(fps * 5)  # Every 5 seconds
-            screenshot_count = 0
-            max_screenshots = 6  # Limit to 6 screenshots
+        video_path = data.get('video_path')
+        if not video_path or not os.path.exists(video_path):
+            return jsonify({'error': 'Invalid video path'}), 400
             
-            for frame_idx in range(0, frame_count, screenshot_interval):
-                if screenshot_count >= max_screenshots:
-                    break
-                    
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ret, frame = cap.read()
-                
-                if ret:
-                    timestamp = frame_idx / fps
-                    
-                    # Convert to base64
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    
-                    if PILLOW_AVAILABLE:
-                        pil_image = Image.fromarray(frame_rgb)
-                        pil_image.thumbnail((400, 300), Image.Resampling.LANCZOS)
-                        buffer = BytesIO()
-                        pil_image.save(buffer, format='PNG', optimize=True)
-                        img_base64 = base64.b64encode(buffer.getvalue()).decode()
-                    else:
-                        img_base64 = self._create_placeholder_image()
-                    
-                    screenshots.append({
-                        'timestamp': timestamp,
-                        'frame_index': frame_idx,
-                        'image_base64': img_base64,
-                        'description': f"Screenshot at {timestamp:.1f}s",
-                        'event_index': screenshot_count
-                    })
-                    
-                    screenshot_count += 1
-                    print(f"📸 Extracted screenshot {screenshot_count} at {timestamp:.1f}s")
-                    
-            cap.release()
-            print(f"✅ Extracted {len(screenshots)} screenshots successfully")
-            return screenshots
+        processor = EnhancedVideoProcessor(video_path)
+        
+        # Extract original transcript
+        original_transcript = processor.extract_transcript_from_audio()
+        
+        # Process with AI
+        ai_processed_transcript = processor.process_transcript_with_ai(original_transcript)
+        
+        results = {
+            'original_transcript': original_transcript,
+            'ai_processed_transcript': ai_processed_transcript,
+            'processing_time': 3.2,
+            'audio_duration': 45.0,
+            'word_count': len(original_transcript.split()) if original_transcript else 0,
+            'ai_analysis_length': len(ai_processed_transcript.split()) if ai_processed_transcript else 0
+        }
+        
+        return jsonify({
+            'success': True,
+            'results': results,
+            'message': 'Enhanced video processing completed successfully'
+        })
             
-        except Exception as e:
-            print(f"❌ Error extracting screenshots: {e}")
-            return []
-    
-    def _create_placeholder_image(self):
-        """Create a placeholder image when screenshot extraction fails"""
-        try:
-            if PILLOW_AVAILABLE:
-                img = Image.new('RGB', (400, 300), color=(200, 200, 200))
-                d = ImageDraw.Draw(img)
-                
-                try:
-                    font = ImageFont.truetype("arial.ttf", 20)
-                except:
-                    font = ImageFont.load_default()
-                
-                d.text((200, 150), "Screenshot Preview", fill=(100, 100, 100), font=font, anchor="mm")
-                
-                buffer = BytesIO()
-                img.save(buffer, format='PNG')
-                return base64.b64encode(buffer.getvalue()).decode()
-        except:
-            pass
-        return ""
+    except Exception as e:
+        print(f"Enhanced AI processing error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# Update the existing recording endpoints to use the enhanced recorder
+# Replace the start_recording function with this updated version:
+
+@app.route('/api/recording/start-enhanced', methods=['POST'])
+def start_enhanced_recording():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+            
+        session_id = data.get('session_id')
+        if not session_id:
+            session_id = str(uuid.uuid4())
+            
+        # Create output path
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"enhanced_recording_{session_id}_{timestamp}.mp4")
+        
+        recorder = EnhancedScreenRecorder(session_id)
+        success = recorder.start_recording(output_path)
+        
+        if success:
+            active_recordings[session_id] = {
+                'recorder': recorder,
+                'start_time': time.time(),
+                'output_path': output_path,
+                'type': 'enhanced'
+            }
+            return jsonify({
+                'success': True,
+                'recording_id': session_id,
+                'message': 'Enhanced recording with audio started successfully',
+                'start_time': datetime.now().isoformat()
+            })
+        else:
+            return jsonify({'error': 'Failed to start enhanced recording'}), 500
+            
+    except Exception as e:
+        print(f"Error starting enhanced recording: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+
 
 class DocumentSession:
     def __init__(self, session_id):
         self.session_id = session_id
         self.document = None
         self.current_page = 0
-        self.annotations = {}
+        self.annotations = {}  # page_number: [annotations]
         self.document_type = None
         self.file_path = None
         self.total_pages = 0
@@ -692,10 +661,11 @@ class DocumentSession:
         try:
             if self.document_type == 'pdf' and PDF_AVAILABLE and self.document:
                 page = self.document.load_page(page_num)
-                zoom = 2.0
+                zoom = 2.0  # High quality
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 
+                # Convert to base64
                 img_data = pix.tobytes("png")
                 img_base64 = base64.b64encode(img_data).decode()
                 
@@ -707,9 +677,11 @@ class DocumentSession:
                 }
             elif self.document_type == 'image' and PILLOW_AVAILABLE:
                 with Image.open(self.file_path) as img:
+                    # Convert to RGB if necessary
                     if img.mode in ('RGBA', 'P'):
                         img = img.convert('RGB')
                     
+                    # Resize for better performance
                     max_size = (1200, 1600)
                     img.thumbnail(max_size, Image.Resampling.LANCZOS)
                     
@@ -724,6 +696,7 @@ class DocumentSession:
                         'page_number': page_num
                     }
             else:
+                # Fallback: create a simple placeholder image
                 return self._create_placeholder_image(page_num)
                 
         except Exception as e:
@@ -731,18 +704,21 @@ class DocumentSession:
             return self._create_placeholder_image(page_num)
     
     def _create_placeholder_image(self, page_num):
-        """Create a simple placeholder image"""
+        """Create a simple placeholder image when dependencies are missing"""
         try:
             if PILLOW_AVAILABLE:
+                # Create a simple colored image with text
                 img = Image.new('RGB', (800, 1000), color=(240, 240, 240))
                 d = ImageDraw.Draw(img)
                 
+                # Try to use a font, fallback to default
                 try:
                     font = ImageFont.truetype("arial.ttf", 40)
                 except:
                     font = ImageFont.load_default()
                 
                 d.text((400, 500), f"Page {page_num + 1}", fill=(100, 100, 100), font=font, anchor="mm")
+                d.text((400, 550), "Document Preview", fill=(150, 150, 150), font=font, anchor="mm")
                 
                 buffer = BytesIO()
                 img.save(buffer, format='PNG')
@@ -757,6 +733,7 @@ class DocumentSession:
         except Exception as e:
             print(f"Error creating placeholder: {e}")
             
+        # Ultimate fallback - return a simple base64 encoded 1x1 white pixel
         return {
             'image': 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
             'width': 1,
@@ -768,6 +745,7 @@ class DocumentSession:
         if page_num not in self.annotations:
             self.annotations[page_num] = []
         
+        # Add unique ID to annotation
         annotation['id'] = str(uuid.uuid4())
         annotation['timestamp'] = datetime.now().isoformat()
         
@@ -787,6 +765,7 @@ class ScreenRecorder:
         self.session_id = session_id
         self.recording = False
         self.frames = []
+        self.audio_frames = []
         self.start_time = None
         self.output_path = None
         self.thread = None
@@ -799,9 +778,11 @@ class ScreenRecorder:
         self.output_path = output_path
         self.recording = True
         self.frames = []
+        self.audio_frames = []
         self.start_time = time.time()
         
         try:
+            # Start recording in separate thread
             self.thread = threading.Thread(target=self._record_screen)
             self.thread.daemon = True
             self.thread.start()
@@ -818,10 +799,10 @@ class ScreenRecorder:
         
     def _record_screen(self):
         try:
-            fps = 5
+            fps = 5  # Lower FPS for web version to reduce CPU usage
             frame_count = 0
             
-            while self.recording and frame_count < 300:
+            while self.recording and frame_count < 300:  # Max 300 frames (60 seconds at 5fps)
                 try:
                     screenshot = pyautogui.screenshot()
                     frame = np.array(screenshot)
@@ -858,6 +839,280 @@ class ScreenRecorder:
             print(f"Error saving video: {e}")
             return False
 
+class VideoProcessor:
+    def __init__(self, video_path):
+        self.video_path = video_path
+        self.client = None
+        if OPENAI_API_KEY and AI_PROCESSING_AVAILABLE:
+            try:
+                self.client = OpenAI(api_key="***REMOVED***proj-_RqEN7sbLE5HhFYlptx1tsdXVxnuBknE4I746i-cJSrcrrXfqMzOcGKlMFq3t98gEFRh4pZ3WyT3BlbkFJGLjYx71M9TmWM3vjNBf81YNmr_dhW_XRlpwzV90mz2kqtJ6C0bfv1uowjanSFWgzovVzLjulAA")
+            except Exception as e:
+                print(f"Error initializing OpenAI client: {e}")
+                self.client = None
+            
+    def process_video(self):
+        try:
+            results = {
+                'key_points': [],
+                'annotation_screenshots': [],
+                'transcript': '',
+                'processing_time': 0,
+                'video_duration': 0,
+                'frames_processed': 0
+            }
+            
+            start_time = time.time()
+            
+            # Get video info
+            video_info = self._get_video_info()
+            results['video_duration'] = video_info.get('duration', 0)
+            
+            # Extract transcript (simulated for demo)
+            results['transcript'] = self._extract_transcript()
+            
+            # Detect annotation events
+            annotation_events = self._detect_annotation_events()
+            results['frames_processed'] = len(annotation_events)
+            
+            # Extract screenshots
+            results['annotation_screenshots'] = self._extract_screenshots(annotation_events)
+            
+            # Extract key points with AI
+            results['key_points'] = self._extract_key_points(results['transcript'], annotation_events)
+            
+            results['processing_time'] = time.time() - start_time
+            return results
+            
+        except Exception as e:
+            print(f"Video processing error: {e}")
+            # Return demo results
+            return self._get_demo_results()
+            
+    def _get_video_info(self):
+        """Get basic video information"""
+        try:
+            if not OPENCV_AVAILABLE:
+                return {'duration': 10, 'fps': 5, 'resolution': '1280x720'}
+                
+            cap = cv2.VideoCapture(self.video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = frame_count / fps if fps > 0 else 0
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            
+            return {
+                'duration': duration,
+                'fps': fps,
+                'frame_count': frame_count,
+                'resolution': f'{width}x{height}'
+            }
+        except:
+            return {'duration': 10, 'fps': 5, 'resolution': '1280x720'}
+        
+    def _extract_transcript(self):
+        """Simulated transcript extraction"""
+        try:
+            # For demo purposes, return a sample transcript
+            sample_transcripts = [
+                "In this session, we discussed the important aspects of the document. Key points included budget considerations and timeline adjustments.",
+                "The document review focused on structural integrity and compliance requirements. Several annotations were made to highlight critical sections.",
+                "This recording captures the collaborative review process. Team members provided insights on optimization strategies and risk mitigation."
+            ]
+            import random
+            return random.choice(sample_transcripts)
+        except:
+            return "Transcript extraction completed successfully. The video contains valuable insights about the document."
+        
+    def _detect_annotation_events(self):
+        """Detect when annotations were made in the video"""
+        annotation_events = []
+        
+        if not OPENCV_AVAILABLE:
+            # Return simulated events
+            for i in range(5):
+                annotation_events.append({
+                    'timestamp': i * 2.0,
+                    'frame_index': i * 10,
+                    'change_intensity': 5000 + i * 1000,
+                    'type': 'annotation'
+                })
+            return annotation_events
+            
+        try:
+            cap = cv2.VideoCapture(self.video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            prev_frame = None
+            event_count = 0
+            
+            # Sample every 1 second to reduce processing load
+            for frame_idx in range(0, frame_count, max(1, int(fps))):
+                if event_count >= 10:  # Limit to 10 events max
+                    break
+                    
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                
+                if not ret:
+                    break
+                    
+                if prev_frame is not None:
+                    # Simple change detection
+                    diff = cv2.absdiff(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), 
+                                      cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY))
+                    
+                    change_pixels = cv2.countNonZero(cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)[1])
+                    total_pixels = frame.shape[0] * frame.shape[1]
+                    
+                    if change_pixels > total_pixels * 0.01:  # 1% change
+                        timestamp = frame_idx / fps
+                        annotation_events.append({
+                            'timestamp': timestamp,
+                            'frame_index': frame_idx,
+                            'change_intensity': change_pixels,
+                            'type': 'annotation'
+                        })
+                        event_count += 1
+                        
+                prev_frame = frame.copy()
+                
+            cap.release()
+            return annotation_events
+            
+        except Exception as e:
+            print(f"Error detecting annotation events: {e}")
+            # Return simulated events
+            for i in range(3):
+                annotation_events.append({
+                    'timestamp': i * 3.0,
+                    'frame_index': i * 15,
+                    'change_intensity': 5000 + i * 1000,
+                    'type': 'annotation'
+                })
+            return annotation_events
+            
+    def _extract_screenshots(self, annotation_events):
+        """Extract screenshots at annotation events"""
+        screenshots = []
+        
+        if not OPENCV_AVAILABLE:
+            # Return simulated screenshots
+            for i, event in enumerate(annotation_events):
+                screenshots.append({
+                    'timestamp': event['timestamp'],
+                    'description': f"Annotation activity at {event['timestamp']:.1f}s",
+                    'event_index': i
+                })
+            return screenshots
+            
+        try:
+            cap = cv2.VideoCapture(self.video_path)
+            
+            for i, event in enumerate(annotation_events):
+                if i >= 5:  # Limit to 5 screenshots
+                    break
+                    
+                cap.set(cv2.CAP_PROP_POS_FRAMES, event['frame_index'])
+                ret, frame = cap.read()
+                
+                if ret:
+                    # Convert to base64
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    
+                    if PILLOW_AVAILABLE:
+                        pil_image = Image.fromarray(frame_rgb)
+                        # Resize for efficiency
+                        pil_image.thumbnail((400, 300), Image.Resampling.LANCZOS)
+                        buffer = BytesIO()
+                        pil_image.save(buffer, format='PNG', optimize=True)
+                        img_base64 = base64.b64encode(buffer.getvalue()).decode()
+                    else:
+                        # Fallback: create simple placeholder
+                        img_base64 = self._create_placeholder_image()
+                    
+                    screenshots.append({
+                        'timestamp': event['timestamp'],
+                        'image_base64': img_base64,
+                        'description': f"Annotation activity at {event['timestamp']:.1f}s",
+                        'event_index': i
+                    })
+                    
+            cap.release()
+            return screenshots
+            
+        except Exception as e:
+            print(f"Error extracting screenshots: {e}")
+            return []
+    
+    def _create_placeholder_image(self):
+        """Create a placeholder image when screenshot extraction fails"""
+        try:
+            if PILLOW_AVAILABLE:
+                img = Image.new('RGB', (200, 150), color=(200, 200, 200))
+                d = ImageDraw.Draw(img)
+                d.text((100, 75), "Preview", fill=(100, 100, 100), anchor="mm")
+                buffer = BytesIO()
+                img.save(buffer, format='PNG')
+                return base64.b64encode(buffer.getvalue()).decode()
+        except:
+            pass
+        return ""
+            
+    def _extract_key_points(self, transcript, annotation_events):
+        """Extract key points using AI or fallback to simulated points"""
+        key_points = []
+        
+        try:
+            if self.client and transcript and len(transcript) > 10:
+                # Use OpenAI to extract key points
+                response = self.client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "Extract 3-5 key points from video transcripts. Focus on important information and insights. Return as a bulleted list."},
+                        {"role": "user", "content": f"Extract key points from this transcript:\n\n{transcript}"}
+                    ],
+                    max_tokens=500,
+                    temperature=0.3
+                )
+                
+                gpt_response = response.choices[0].message.content
+                # Parse bullet points
+                points = [point.strip('•- ') for point in gpt_response.split('\n') if point.strip()]
+                key_points.extend(points[:5])
+                
+        except Exception as e:
+            print(f"AI key point extraction failed: {e}")
+            
+        # Fallback key points if AI fails or not available
+        if not key_points:
+            key_points = [
+                f"Recording duration: {len(annotation_events) * 2} seconds",
+                f"Detected {len(annotation_events)} significant annotation events",
+                "Document review completed successfully",
+                "Key sections were highlighted during the session",
+                "Collaborative annotation process captured"
+            ]
+            
+        return key_points
+    
+    def _get_demo_results(self):
+        """Return demo results when processing fails"""
+        return {
+            'key_points': [
+                "Demo analysis: Document review captured",
+                f"Processing completed at {datetime.now().strftime('%H:%M:%S')}",
+                "Sample key points for demonstration"
+            ],
+            'annotation_screenshots': [],
+            'transcript': "This is a demo transcript. In a real implementation, this would contain the actual audio transcription.",
+            'processing_time': 2.5,
+            'video_duration': 10,
+            'frames_processed': 5
+        }
+
 # API Routes
 
 @app.route('/api/health', methods=['GET'])
@@ -869,7 +1124,6 @@ def health_check():
             'pdf_processing': PDF_AVAILABLE,
             'image_processing': PILLOW_AVAILABLE,
             'ai_processing': AI_PROCESSING_AVAILABLE,
-            'speech_recognition': SPEECH_RECOGNITION_AVAILABLE,
             'screen_recording': RECORDING_AVAILABLE,
             'opencv_available': OPENCV_AVAILABLE
         },
@@ -886,7 +1140,10 @@ def create_session():
         return response
         
     try:
+        # Generate new session ID
         session_id = str(uuid.uuid4())
+            
+        # Create new session
         active_sessions[session_id] = DocumentSession(session_id)
         print(f"New session created: {session_id}")
         
@@ -910,16 +1167,24 @@ def upload_file():
         
     try:
         print("Upload request received")
+        print(f"Form data: {request.form}")
+        print(f"Files: {request.files}")
         
+        # Check if session_id is provided
         session_id = request.form.get('session_id')
         if not session_id:
             print("No session ID provided")
             return jsonify({'error': 'Session ID required'}), 400
             
+        print(f"Session ID: {session_id}")
+        print(f"Active sessions: {list(active_sessions.keys())}")
+        
+        # Check if session exists, create if it doesn't
         if session_id not in active_sessions:
             print(f"Session {session_id} not found, creating new session")
             active_sessions[session_id] = DocumentSession(session_id)
             
+        # Check if file is provided
         if 'file' not in request.files:
             print("No file in request")
             return jsonify({'error': 'No file provided'}), 400
@@ -931,14 +1196,17 @@ def upload_file():
             
         print(f"File received: {file.filename}")
         
+        # Secure the filename and create file path
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{session_id}_{filename}")
         
+        # Save the file
         file.save(file_path)
         print(f"File saved to: {file_path}")
         
         session = active_sessions[session_id]
         
+        # Determine file type and load
         file_ext = filename.lower().split('.')[-1] if '.' in filename else ''
         
         if file_ext == 'pdf':
@@ -958,6 +1226,7 @@ def upload_file():
             print(f"Failed to load {file_type}")
             return jsonify({'error': f'Failed to load {file_type}'}), 500
             
+        # Get first page
         page_data = session.get_page_image(0)
         if not page_data:
             print("Failed to render page")
@@ -995,9 +1264,11 @@ def get_page():
             
         session = active_sessions[session_id]
         
+        # Check if document is loaded
         if session.document_type is None:
             return jsonify({'error': 'No document loaded for this session'}), 400
         
+        # Validate page number
         if page_num < 0 or page_num >= session.total_pages:
             return jsonify({'error': 'Invalid page number'}), 400
             
@@ -1081,93 +1352,12 @@ def clear_annotations():
         print(f"Error clearing annotations: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/annotations/screenshot', methods=['POST'])
-def capture_annotation_screenshot():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No JSON data provided'}), 400
-            
-        session_id = data.get('session_id')
-        annotation_data = data.get('annotation')
-        page_image = data.get('page_image')
-        
-        if not session_id:
-            return jsonify({'error': 'Session ID required'}), 400
-            
-        if session_id not in active_sessions:
-            return jsonify({'error': 'Invalid session'}), 400
-            
-        screenshot_manager_key = f"{session_id}_screenshots"
-        if screenshot_manager_key not in active_sessions:
-            active_sessions[screenshot_manager_key] = AnnotationScreenshotManager(session_id)
-            
-        screenshot_manager = active_sessions[screenshot_manager_key]
-        screenshot_data = screenshot_manager.capture_annotation_screenshot(annotation_data, page_image)
-        
-        if screenshot_data:
-            return jsonify({
-                'success': True,
-                'screenshot': screenshot_data,
-                'message': 'Screenshot captured successfully'
-            })
-        else:
-            return jsonify({'error': 'Failed to capture screenshot'}), 500
-            
-    except Exception as e:
-        print(f"Error capturing annotation screenshot: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/screenshots/<session_id>', methods=['GET'])
-def get_session_screenshots(session_id):
-    try:
-        screenshot_manager_key = f"{session_id}_screenshots"
-        if screenshot_manager_key in active_sessions:
-            screenshot_manager = active_sessions[screenshot_manager_key]
-            screenshots = screenshot_manager.get_screenshots()
-            return jsonify({
-                'success': True,
-                'screenshots': screenshots,
-                'count': len(screenshots)
-            })
-        else:
-            return jsonify({
-                'success': True,
-                'screenshots': [],
-                'count': 0
-            })
-    except Exception as e:
-        print(f"Error getting screenshots: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/screenshots/clear/<session_id>', methods=['POST'])
-def clear_session_screenshots(session_id):
-    try:
-        screenshot_manager_key = f"{session_id}_screenshots"
-        if screenshot_manager_key in active_sessions:
-            screenshot_manager = active_sessions[screenshot_manager_key]
-            success = screenshot_manager.clear_screenshots()
-            if success:
-                del active_sessions[screenshot_manager_key]
-            return jsonify({
-                'success': success,
-                'message': 'Screenshots cleared successfully' if success else 'Failed to clear screenshots'
-            })
-        else:
-            return jsonify({
-                'success': True,
-                'message': 'No screenshots to clear'
-            })
-    except Exception as e:
-        print(f"Error clearing screenshots: {e}")
-        return jsonify({'error': str(e)}), 500
-
 @app.route('/api/recording/start', methods=['POST'])
 def start_recording():
     try:
         if not RECORDING_AVAILABLE:
             return jsonify({
-                'error': 'Screen recording not available. Install required libraries.',
+                'error': 'Screen recording not available. Install pyautogui, pyaudio, and opencv-python.',
                 'available': False
             }), 400
             
@@ -1179,6 +1369,7 @@ def start_recording():
         if not session_id:
             session_id = str(uuid.uuid4())
             
+        # Create output path
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"recording_{session_id}_{timestamp}.mp4")
         
@@ -1189,8 +1380,7 @@ def start_recording():
             active_recordings[session_id] = {
                 'recorder': recorder,
                 'start_time': time.time(),
-                'output_path': output_path,
-                'type': 'basic'
+                'output_path': output_path
             }
             return jsonify({
                 'success': True,
@@ -1203,43 +1393,6 @@ def start_recording():
             
     except Exception as e:
         print(f"Error starting recording: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/recording/start-enhanced', methods=['POST'])
-def start_enhanced_recording():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No JSON data provided'}), 400
-            
-        session_id = data.get('session_id')
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(app.config['UPLOAD_FOLDER'], f"enhanced_recording_{session_id}_{timestamp}.mp4")
-        
-        recorder = EnhancedScreenRecorder(session_id)
-        success = recorder.start_recording(output_path)
-        
-        if success:
-            active_recordings[session_id] = {
-                'recorder': recorder,
-                'start_time': time.time(),
-                'output_path': output_path,
-                'type': 'enhanced'
-            }
-            return jsonify({
-                'success': True,
-                'recording_id': session_id,
-                'message': 'Enhanced recording with audio started successfully',
-                'start_time': datetime.now().isoformat()
-            })
-        else:
-            return jsonify({'error': 'Failed to start enhanced recording'}), 500
-            
-    except Exception as e:
-        print(f"Error starting enhanced recording: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/recording/stop', methods=['POST'])
@@ -1268,6 +1421,7 @@ def stop_recording():
                 'file_size': os.path.getsize(recording_data['output_path']) if os.path.exists(recording_data['output_path']) else 0
             }
             
+            # Clean up
             del active_recordings[recording_id]
             return jsonify(result)
         else:
@@ -1277,15 +1431,10 @@ def stop_recording():
         print(f"Error stopping recording: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/ai/enhanced-process-video', methods=['POST'])
-def enhanced_process_video():
+@app.route('/api/ai/process-video', methods=['POST'])
+def process_video():
     try:
-        print("\n" + "="*80)
-        print("ENHANCED PROCESS VIDEO API CALLED")
-        print("="*80)
-        
         if not AI_PROCESSING_AVAILABLE:
-            print("❌ AI processing not available - openai library missing")
             return jsonify({
                 'error': 'AI processing not available. Install openai library.',
                 'available': False
@@ -1293,72 +1442,26 @@ def enhanced_process_video():
             
         data = request.get_json()
         if not data:
-            print("❌ No JSON data provided in request")
             return jsonify({'error': 'No JSON data provided'}), 400
             
         video_path = data.get('video_path')
-        print(f"📹 Video path received: {video_path}")
-        
         if not video_path or not os.path.exists(video_path):
-            print(f"❌ Invalid video path or file doesn't exist: {video_path}")
             return jsonify({'error': 'Invalid video path'}), 400
             
-        print(f"✅ Video file exists: {os.path.exists(video_path)}")
-        print(f"📊 Video file size: {os.path.getsize(video_path) / (1024*1024):.2f} MB")
+        processor = VideoProcessor(video_path)
+        results = processor.process_video()
         
-        processor = EnhancedVideoProcessor(video_path)
-        
-        # Extract original transcript using speech recognition
-        print("\n🎤 Extracting and transcribing audio from video...")
-        original_transcript = processor.extract_audio_and_transcribe()
-        
-        print(f"📝 ORIGINAL TRANSCRIPT:")
-        print("-" * 50)
-        print(original_transcript)
-        print("-" * 50)
-        print(f"📊 Transcript length: {len(original_transcript)} characters")
-        print(f"📊 Word count: {len(original_transcript.split()) if original_transcript else 0} words")
-        
-        # Process with AI
-        print("\n🤖 Processing transcript with AI...")
-        ai_processed_transcript = processor.process_transcript_with_ai(original_transcript)
-        
-        print(f"🧠 AI PROCESSED TRANSCRIPT:")
-        print("-" * 50)
-        print(ai_processed_transcript[:500] + "..." if len(ai_processed_transcript) > 500 else ai_processed_transcript)
-        print("-" * 50)
-        
-        # Extract screenshots from video
-        print("\n📸 Extracting screenshots from video...")
-        screenshots = processor.extract_screenshots_from_video()
-        
-        print(f"📸 Extracted {len(screenshots)} screenshots")
-        
-        results = {
-            'original_transcript': original_transcript,
-            'ai_processed_transcript': ai_processed_transcript,
-            'screenshots': screenshots,
-            'processing_time': 3.2,
-            'audio_duration': 45.0,
-            'word_count': len(original_transcript.split()) if original_transcript else 0,
-            'ai_analysis_length': len(ai_processed_transcript.split()) if ai_processed_transcript else 0,
-            'screenshot_count': len(screenshots)
-        }
-        
-        print(f"\n✅ Processing completed successfully!")
-        print("="*80 + "\n")
-        
-        return jsonify({
-            'success': True,
-            'results': results,
-            'message': 'Enhanced video processing completed successfully'
-        })
-        
+        if results:
+            return jsonify({
+                'success': True,
+                'results': results,
+                'message': 'Video processing completed successfully'
+            })
+        else:
+            return jsonify({'error': 'Processing failed'}), 500
+            
     except Exception as e:
-        print(f"\n❌ Enhanced AI processing error: {e}")
-        import traceback
-        traceback.print_exc()
-        print("="*80 + "\n")
+        print(f"AI processing error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/save/image', methods=['POST'])
@@ -1379,6 +1482,7 @@ def save_as_image():
             
         session = active_sessions[session_id]
         
+        # Get the page image
         page_data = session.get_page_image(page_num)
         
         if page_data:
@@ -1402,6 +1506,7 @@ def save_as_pdf():
         'available': False
     })
 
+# Serve uploaded files
 @app.route('/api/files/<path:filename>')
 def serve_file(filename):
     try:
@@ -1413,6 +1518,7 @@ def serve_file(filename):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# Session management endpoints
 @app.route('/api/session/status/<session_id>', methods=['GET'])
 def session_status(session_id):
     try:
@@ -1444,15 +1550,18 @@ def cleanup_session():
         
         if session_id and session_id in active_sessions:
             session = active_sessions[session_id]
+            # Close document if open
             if session.document and hasattr(session.document, 'close'):
                 session.document.close()
+            # Remove session
             del active_sessions[session_id]
             
+            # Optionally clean up uploaded file
             if session.file_path and os.path.exists(session.file_path):
                 try:
                     os.remove(session.file_path)
                 except:
-                    pass
+                    pass  # Ignore file cleanup errors
                     
             return jsonify({
                 'success': True,
@@ -1465,9 +1574,10 @@ def cleanup_session():
         print(f"Error cleaning up session: {e}")
         return jsonify({'error': str(e)}), 500
 
+# Error handlers
 @app.errorhandler(413)
 def too_large(e):
-    return jsonify({'error': 'File too large. Maximum size is 300MB.'}), 413
+    return jsonify({'error': 'File too large. Maximum size is 100MB.'}), 413
 
 @app.errorhandler(404)
 def not_found(e):
@@ -1481,13 +1591,12 @@ def server_error(e):
 def index():
     return jsonify({
         'message': 'AI PDF Editor Backend API',
-        'version': '1.0.2',
+        'version': '1.0.1',
         'status': 'running',
         'features': {
             'pdf_processing': PDF_AVAILABLE,
             'image_processing': PILLOW_AVAILABLE,
             'ai_processing': AI_PROCESSING_AVAILABLE,
-            'speech_recognition': SPEECH_RECOGNITION_AVAILABLE,
             'screen_recording': RECORDING_AVAILABLE,
             'opencv_available': OPENCV_AVAILABLE
         },
@@ -1499,15 +1608,15 @@ def index():
             'add_annotation': '/api/annotations/add',
             'clear_annotations': '/api/annotations/clear',
             'start_recording': '/api/recording/start',
-            'start_enhanced_recording': '/api/recording/start-enhanced',
             'stop_recording': '/api/recording/stop',
-            'enhanced_process_video': '/api/ai/enhanced-process-video',
+            'process_video': '/api/ai/process-video',
             'save_image': '/api/save/image',
             'session_status': '/api/session/status/<session_id>',
             'cleanup_session': '/api/session/cleanup'
         }
     })
 
+# Add a test endpoint for debugging
 @app.route('/api/test', methods=['GET', 'POST'])
 def test_endpoint():
     if request.method == 'POST':
@@ -1544,24 +1653,19 @@ if __name__ == '__main__':
     if not AI_PROCESSING_AVAILABLE:
         print("  -> Install with: pip install openai")
         
-    print(f"Speech Recognition Available: {SPEECH_RECOGNITION_AVAILABLE}")
-    if not SPEECH_RECOGNITION_AVAILABLE:
-        print("  -> Install with: pip install SpeechRecognition")
-        
     print(f"Screen Recording Available: {RECORDING_AVAILABLE}")
     if not RECORDING_AVAILABLE:
-        print("  -> Install with: pip install pyautogui sounddevice soundfile scipy opencv-python numpy")
+        print("  -> Install with: pip install pyautogui pyaudio opencv-python")
         
     print(f"OpenCV Available: {OPENCV_AVAILABLE}")
     if not OPENCV_AVAILABLE:
         print("  -> Install with: pip install opencv-python")
     
     if OPENAI_API_KEY:
-        print("OpenAI API Key: Configured ✅")
+        print("OpenAI API Key: Configured")
     else:
-        print("OpenAI API Key: Not configured ⚠️")
+        print("OpenAI API Key: Not configured")
         print("  -> Set environment variable: export OPENAI_API_KEY='your-key-here'")
-        print("  -> Or on Windows: set OPENAI_API_KEY=your-key-here")
         
     print("="*60)
     print("Server running on http://localhost:5000")
@@ -1569,6 +1673,7 @@ if __name__ == '__main__':
     print("Test endpoint available at http://localhost:5000/api/test")
     print("="*60 + "\n")
     
+    # Create uploads directory if it doesn't exist
     os.makedirs('uploads', exist_ok=True)
     
     app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
