@@ -12,6 +12,7 @@ from io import BytesIO
 import uuid
 import queue
 import subprocess
+import requests
 
 # Import your existing classes
 try:
@@ -73,6 +74,11 @@ app.config['MAX_CONTENT_LENGTH'] = 300 * 1024 * 1024  # 300MB max file size
 
 # OpenAI API Key - USE ENVIRONMENT VARIABLE FOR SECURITY
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
+
+# Webhook Configuration
+DEFAULT_WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'https://imp.ecom.ind.in//api/v1/comments/createByAI')
+DEFAULT_TASK_ID = '21'
+DEFAULT_CREATED_BY_ID = '1'
 
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -643,6 +649,145 @@ This review session demonstrated thorough analysis of the document with particul
         except:
             pass
         return ""
+
+def send_to_webhook(video_path, screenshots, transcript, webhook_url, task_id="21", created_by_id="1", session_id=None):
+    """
+    Send video, screenshots, and transcript to webhook API
+    Also saves screenshots to disk for the session
+    """
+    try:
+        print("\n" + "="*80)
+        print("SENDING DATA TO WEBHOOK")
+        print("="*80)
+        print(f"🌐 Webhook URL: {webhook_url}")
+        print(f"📹 Video: {video_path}")
+        print(f"📸 Screenshots: {len(screenshots)} files")
+        print(f"📝 Transcript length: {len(transcript)} characters")
+        
+        # Create session screenshots folder if session_id provided
+        screenshot_folder = None
+        if session_id:
+            screenshot_folder = os.path.join('uploads', f'screenshots_{session_id}')
+            os.makedirs(screenshot_folder, exist_ok=True)
+            print(f"📁 Screenshot folder: {screenshot_folder}")
+        
+        # Prepare multipart form data
+        files = []
+        saved_screenshot_paths = []
+        form_data = {
+            'taskId': task_id,
+            'content': transcript,
+            'createdById': created_by_id
+        }
+        
+        # Add video file
+        if os.path.exists(video_path):
+            video_filename = os.path.basename(video_path)
+            with open(video_path, 'rb') as video_file:
+                video_content = video_file.read()
+                files.append(('attachment', (video_filename, video_content, 'video/mp4')))
+            print(f"✅ Added video: {video_filename} ({len(video_content) / (1024*1024):.2f} MB)")
+            print(f"   📂 Video location: {video_path}")
+        else:
+            print(f"⚠️ Video file not found at: {video_path}")
+        
+        # Add screenshot files and save them to disk
+        screenshot_files_added = 0
+        for i, screenshot in enumerate(screenshots):
+            try:
+                if 'image_base64' in screenshot:
+                    # Decode base64 screenshot
+                    img_data = base64.b64decode(screenshot['image_base64'])
+                    screenshot_filename = f"screenshot_{i+1}_at_{screenshot['timestamp']:.1f}s.png"
+                    
+                    # Save screenshot to disk if session folder exists
+                    if screenshot_folder:
+                        screenshot_path = os.path.join(screenshot_folder, screenshot_filename)
+                        with open(screenshot_path, 'wb') as f:
+                            f.write(img_data)
+                        saved_screenshot_paths.append(screenshot_path)
+                        print(f"✅ Saved screenshot {i+1} to: {screenshot_path}")
+                    
+                    # Add to webhook files
+                    files.append(('attachment', (screenshot_filename, img_data, 'image/png')))
+                    screenshot_files_added += 1
+                    print(f"✅ Added screenshot {i+1} to webhook: {screenshot_filename} ({len(img_data) / 1024:.1f} KB)")
+            except Exception as e:
+                print(f"⚠️ Failed to process screenshot {i+1}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        print(f"\n📤 Sending request to webhook...")
+        print(f"   - Files: {len(files)} attachments")
+        print(f"   - Form data: {form_data}")
+        
+        # Send POST request to webhook
+        response = requests.post(
+            webhook_url,
+            files=files,
+            data=form_data,
+            timeout=60
+        )
+        
+        print(f"\n📥 Webhook Response:")
+        print(f"   - Status Code: {response.status_code}")
+        print(f"   - Response: {response.text[:500]}")
+        
+        if response.status_code in [200, 201]:
+            print(f"✅ Successfully sent data to webhook!")
+            if saved_screenshot_paths:
+                print(f"📁 Screenshots saved to disk: {len(saved_screenshot_paths)} files")
+                for path in saved_screenshot_paths:
+                    print(f"   - {path}")
+            print("="*80 + "\n")
+            return {
+                'success': True,
+                'status_code': response.status_code,
+                'response': response.json() if response.headers.get('content-type', '').startswith('application/json') else response.text,
+                'files_sent': len(files),
+                'video_path': video_path,
+                'screenshot_paths': saved_screenshot_paths,
+                'screenshot_folder': screenshot_folder
+            }
+        else:
+            print(f"⚠️ Webhook returned non-success status: {response.status_code}")
+            print("="*80 + "\n")
+            return {
+                'success': False,
+                'status_code': response.status_code,
+                'response': response.text,
+                'files_sent': len(files),
+                'video_path': video_path,
+                'screenshot_paths': saved_screenshot_paths,
+                'screenshot_folder': screenshot_folder
+            }
+            
+    except requests.exceptions.Timeout:
+        print(f"❌ Webhook request timed out")
+        print("="*80 + "\n")
+        return {
+            'success': False,
+            'error': 'Request timeout',
+            'files_sent': 0
+        }
+    except requests.exceptions.ConnectionError as e:
+        print(f"❌ Connection error: {e}")
+        print("="*80 + "\n")
+        return {
+            'success': False,
+            'error': f'Connection error: {str(e)}',
+            'files_sent': 0
+        }
+    except Exception as e:
+        print(f"❌ Error sending to webhook: {e}")
+        import traceback
+        traceback.print_exc()
+        print("="*80 + "\n")
+        return {
+            'success': False,
+            'error': str(e),
+            'files_sent': 0
+        }
 
 class DocumentSession:
     def __init__(self, session_id):
@@ -1345,13 +1490,56 @@ def enhanced_process_video():
             'screenshot_count': len(screenshots)
         }
         
+        # Send to webhook (uses default if not provided)
+        webhook_result = None
+        webhook_url = data.get('webhook_url', DEFAULT_WEBHOOK_URL)
+        task_id = data.get('task_id', DEFAULT_TASK_ID)
+        created_by_id = data.get('created_by_id', DEFAULT_CREATED_BY_ID)
+        send_webhook = data.get('send_webhook', True)  # Default to True
+        
+        if send_webhook and webhook_url:
+            if webhook_url == DEFAULT_WEBHOOK_URL:
+                print(f"\n🔗 Using default webhook URL: {webhook_url}")
+            else:
+                print(f"\n🔗 Using custom webhook URL: {webhook_url}")
+            
+            print(f"📋 Task ID: {task_id}, Created By ID: {created_by_id}")
+            
+            # Extract session_id from video path (e.g., enhanced_recording_SESSION-ID_timestamp.mp4)
+            session_id = None
+            try:
+                video_filename = os.path.basename(video_path)
+                if 'enhanced_recording_' in video_filename or 'recording_' in video_filename:
+                    # Extract session_id from filename pattern
+                    parts = video_filename.replace('enhanced_recording_', '').replace('recording_', '').split('_')
+                    if len(parts) > 0:
+                        session_id = parts[0]
+                        print(f"📋 Extracted session ID: {session_id}")
+            except Exception as e:
+                print(f"⚠️ Could not extract session ID: {e}")
+            
+            webhook_result = send_to_webhook(
+                video_path=video_path,
+                screenshots=screenshots,
+                transcript=original_transcript,
+                webhook_url=webhook_url,
+                task_id=task_id,
+                created_by_id=created_by_id,
+                session_id=session_id
+            )
+            results['webhook'] = webhook_result
+        else:
+            print(f"\n⚠️ Webhook disabled or no URL provided, skipping webhook send")
+        
         print(f"\n✅ Processing completed successfully!")
         print("="*80 + "\n")
         
         return jsonify({
             'success': True,
             'results': results,
-            'message': 'Enhanced video processing completed successfully'
+            'message': 'Enhanced video processing completed successfully',
+            'webhook_sent': webhook_result is not None,
+            'webhook_result': webhook_result
         })
         
     except Exception as e:
@@ -1562,6 +1750,12 @@ if __name__ == '__main__':
         print("OpenAI API Key: Not configured ⚠️")
         print("  -> Set environment variable: export OPENAI_API_KEY='your-key-here'")
         print("  -> Or on Windows: set OPENAI_API_KEY=your-key-here")
+    
+    print("\nWebhook Configuration:")
+    print(f"  Default Webhook URL: {DEFAULT_WEBHOOK_URL}")
+    print(f"  Default Task ID: {DEFAULT_TASK_ID}")
+    print(f"  Default Created By ID: {DEFAULT_CREATED_BY_ID}")
+    print("  -> To change: set WEBHOOK_URL environment variable")
         
     print("="*60)
     print("Server running on http://localhost:5000")
