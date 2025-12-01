@@ -16,7 +16,11 @@ import soundfile as sf
 from scipy.io import wavfile
 import threading
 import queue
+# CREATE ENVIRONMENT
+from dotenv import load_dotenv
+import os
 
+load_dotenv()  # Load .env file
 # Import your existing classes
 try:
     import fitz  # PyMuPDF
@@ -67,7 +71,7 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 300 * 1024 * 1024  # 300MB max file size
 
 # OpenAI API Key (keep this secure - use environment variable)
-OPENAI_API_KEY = ''
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 
 # Ensure upload directory exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
