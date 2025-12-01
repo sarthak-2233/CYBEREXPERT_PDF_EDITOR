@@ -349,23 +349,74 @@ class EnhancedVideoProcessor:
                 print(f"Error initializing OpenAI client: {e}")
                 self.client = None
                 
-    def extract_transcript_from_audio(self):
-        """Extract transcript from audio file using Whisper API"""
-        try:
-            if self.client and os.path.exists(self.audio_path):
-                with open(self.audio_path, "rb") as audio_file:
-                    transcript_response = self.client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=audio_file,
-                        response_format="text"
-                    )
-                    return transcript_response
-            else:
-                return self._generate_mock_transcript()
-        except Exception as e:
-            print(f"Error extracting transcript: {e}")
-            return self._generate_mock_transcript()
+    # def extract_transcript_from_audio(self):
+    #     """Extract transcript from audio file using Whisper API"""
+    #     try:
+    #         if self.client and os.path.exists(self.audio_path):
+    #             with open(self.audio_path, "rb") as audio_file:
+    #                 transcript_response = self.client.audio.transcriptions.create(
+    #                     model="whisper-1",
+    #                     file=audio_file,
+    #                     response_format="text"
+    #                 )
+    #                 return transcript_response
+    #         else:
+    #             return self._generate_mock_transcript()
+    #     except Exception as e:
+    #         print(f"Error extracting transcript: {e}")
+    #         return self._generate_mock_transcript()
+    
+    # NEW ADD
+def extract_transcript_from_audio(self):
+    """Extract transcript from audio file using Whisper API - REAL TRANSCRIPTION ONLY"""
+    
+    # Check if we can do real transcription
+    if not self.client:
+        return self._return_error_message("OpenAI client not initialized. Please set OPENAI_API_KEY environment variable.")
+    
+    if not os.path.exists(self.audio_path):
+        return self._return_error_message(f"Audio file not found: {self.audio_path}")
+    
+    try:
+        print(f"🎤 Transcribing audio file: {self.audio_path}")
+        
+        # Check file size
+        file_size = os.path.getsize(self.audio_path)
+        print(f"📊 Audio file size: {file_size / 1024 / 1024:.2f} MB")
+        
+        if file_size > 25 * 1024 * 1024:  # 25MB limit for Whisper API
+            return self._return_error_message("Audio file too large (>25MB). Please record shorter sessions.")
+        
+        # Open and transcribe the audio file
+        with open(self.audio_path, "rb") as audio_file:
+            print(f"📤 Sending to Whisper API...")
+            transcript_response = self.client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="text",
+                language="en"  # You can change this to your language
+            )
             
+        print(f"✓ Transcription successful! Length: {len(transcript_response)} characters")
+        
+        # Return the actual transcription
+        if transcript_response and len(transcript_response.strip()) > 0:
+            return transcript_response
+        else:
+            return self._return_error_message("Whisper returned empty transcription. No speech detected in audio.")
+            
+    except openai.APIError as e:
+        return self._return_error_message(f"OpenAI API error: {str(e)}")
+    except openai.AuthenticationError as e:
+        return self._return_error_message(f"Authentication failed. Please check your API key: {str(e)}")
+    except Exception as e:
+        return self._return_error_message(f"Unexpected error during transcription: {str(e)}")
+
+def _return_error_message(self, error_msg):
+    """Return a clear error message instead of mock data"""
+    print(f"❌ {error_msg}")
+    return f"[TRANSCRIPTION ERROR]\n\n{error_msg}\n\nTo enable real transcription:\n1. Set OPENAI_API_KEY environment variable\n2. Ensure audio was recorded properly\n3. Check that audio file contains speech"
+
     def _generate_mock_transcript(self):
         """Generate a mock transcript for demo purposes"""
         mock_transcripts = [
@@ -376,14 +427,55 @@ class EnhancedVideoProcessor:
         import random
         return random.choice(mock_transcripts)
             
-    def process_transcript_with_ai(self, original_transcript):
-        """Process original transcript with AI to extract key insights"""
-        try:
-            if self.client and original_transcript:
-                response = self.client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[
-                        {"role": "system", "content": """You are an expert document analyst. Analyze the transcript of a document review session and provide:
+#     def process_transcript_with_ai(self, original_transcript):
+#         """Process original transcript with AI to extract key insights"""
+#         try:
+#             if self.client and original_transcript:
+#                 response = self.client.chat.completions.create(
+#                     model="gpt-4",
+#                     messages=[
+#                         {"role": "system", "content": """You are an expert document analyst. Analyze the transcript of a document review session and provide:
+
+# 1. A structured summary of key points discussed
+# 2. Important insights and observations made
+# 3. Action items or recommendations mentioned
+# 4. Technical details or specifications highlighted
+# 5. Areas of concern or risk identified
+
+# Format your response as a comprehensive analysis that would be useful for someone who wasn't present during the review session."""},
+#                         {"role": "user", "content": f"Please analyze this document review transcript and provide a comprehensive summary:\n\n{original_transcript}"}
+#                     ],
+#                     max_tokens=1500,
+#                     temperature=0.3
+#                 )
+                
+#                 return response.choices[0].message.content
+#             else:
+#                 return self._generate_mock_ai_analysis(original_transcript)
+#         except Exception as e:
+#             print(f"Error processing transcript with AI: {e}")
+#             return self._generate_mock_ai_analysis(original_transcript)
+
+
+
+# NEW ADD
+def process_transcript_with_ai(self, original_transcript):
+    """Process original transcript with AI to extract key insights"""
+    
+    # Don't process error messages
+    if original_transcript.startswith("[TRANSCRIPTION ERROR]"):
+        return "Cannot analyze transcript due to transcription error. Please fix the error above first."
+    
+    if not self.client:
+        return "[AI ANALYSIS ERROR]\n\nOpenAI client not initialized. Cannot process transcript."
+    
+    try:
+        print(f"🧠 Processing transcript with AI...")
+        
+        response = self.client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": """You are an expert document analyst. Analyze the transcript of a document review session and provide:
 
 1. A structured summary of key points discussed
 2. Important insights and observations made
@@ -392,53 +484,22 @@ class EnhancedVideoProcessor:
 5. Areas of concern or risk identified
 
 Format your response as a comprehensive analysis that would be useful for someone who wasn't present during the review session."""},
-                        {"role": "user", "content": f"Please analyze this document review transcript and provide a comprehensive summary:\n\n{original_transcript}"}
-                    ],
-                    max_tokens=1500,
-                    temperature=0.3
-                )
-                
-                return response.choices[0].message.content
-            else:
-                return self._generate_mock_ai_analysis(original_transcript)
-        except Exception as e:
-            print(f"Error processing transcript with AI: {e}")
-            return self._generate_mock_ai_analysis(original_transcript)
-            
-    def _generate_mock_ai_analysis(self, original_transcript):
-        """Generate mock AI analysis for demo"""
-        return f"""
-**AI-PROCESSED ANALYSIS**
+                {"role": "user", "content": f"Please analyze this document review transcript and provide a comprehensive summary:\n\n{original_transcript}"}
+            ],
+            max_tokens=1500,
+            temperature=0.3
+        )
+        
+        analysis = response.choices[0].message.content
+        print(f"✓ AI analysis complete! Length: {len(analysis)} characters")
+        return analysis
+        
+    except Exception as e:
+        error_msg = f"[AI ANALYSIS ERROR]\n\nFailed to process transcript: {str(e)}"
+        print(f"❌ {error_msg}")
+        return error_msg
 
-**Key Points Identified:**
-• Document review session covered multiple critical sections
-• Primary focus on implementation strategy and timeline considerations
-• Budget and resource allocation discussed extensively
-• Risk assessment highlighted as priority area
-
-**Important Insights:**
-• Strong emphasis on technical specifications and system requirements
-• Performance metrics identified as key success indicators
-• Security protocols require immediate attention
-• Architecture design appears well-structured
-
-**Recommended Actions:**
-• Follow up on timeline adjustments mentioned during review
-• Validate budget assumptions with finance team
-• Schedule detailed security review session
-• Create implementation checklist based on highlighted items
-
-**Areas Requiring Attention:**
-• Performance benchmarks need clarification
-• Resource allocation may need adjustment
-• Technical dependencies should be mapped out
-• Risk mitigation strategies need development
-
-**Summary:**
-This review session demonstrated thorough analysis of the document with particular attention to implementation details. The reviewer showed strong understanding of technical requirements and identified critical areas for follow-up. The systematic approach to highlighting key sections will facilitate effective project planning and execution.
-
-*Analysis based on transcript of {len(original_transcript.split())} words, processed with advanced natural language understanding.*
-        """
+    
 
 # Add new API endpoints to your existing app.py
 
@@ -524,12 +585,19 @@ def clear_session_screenshots(session_id):
         print(f"Error clearing screenshots: {e}")
         return jsonify({'error': str(e)}), 500
 
+# NEW ADDED
 @app.route('/api/ai/enhanced-process-video', methods=['POST'])
 def enhanced_process_video():
     try:
         if not AI_PROCESSING_AVAILABLE:
             return jsonify({
-                'error': 'AI processing not available. Install openai library.',
+                'error': 'AI processing not available. Install openai library with: pip install openai',
+                'available': False
+            }), 400
+        
+        if not OPENAI_API_KEY:
+            return jsonify({
+                'error': 'OpenAI API key not configured. Set OPENAI_API_KEY environment variable.',
                 'available': False
             }), 400
             
@@ -540,33 +608,101 @@ def enhanced_process_video():
         video_path = data.get('video_path')
         if not video_path or not os.path.exists(video_path):
             return jsonify({'error': 'Invalid video path'}), 400
-            
+        
+        print(f"\n{'='*60}")
+        print(f"🎬 Processing video with REAL transcription")
+        print(f"📁 Video: {video_path}")
+        print(f"{'='*60}\n")
+        
         processor = EnhancedVideoProcessor(video_path)
         
-        # Extract original transcript
+        # Extract REAL transcript (no mocking)
         original_transcript = processor.extract_transcript_from_audio()
         
-        # Process with AI
-        ai_processed_transcript = processor.process_transcript_with_ai(original_transcript)
+        # Only process with AI if transcription succeeded
+        if not original_transcript.startswith("[TRANSCRIPTION ERROR]"):
+            ai_processed_transcript = processor.process_transcript_with_ai(original_transcript)
+        else:
+            ai_processed_transcript = "Cannot analyze - transcription failed. Please check the error message above."
+        
+        # Calculate statistics
+        word_count = len(original_transcript.split()) if original_transcript else 0
+        is_real_transcription = not original_transcript.startswith("[TRANSCRIPTION ERROR]")
         
         results = {
             'original_transcript': original_transcript,
             'ai_processed_transcript': ai_processed_transcript,
             'processing_time': 3.2,
             'audio_duration': 45.0,
-            'word_count': len(original_transcript.split()) if original_transcript else 0,
-            'ai_analysis_length': len(ai_processed_transcript.split()) if ai_processed_transcript else 0
+            'word_count': word_count,
+            'ai_analysis_length': len(ai_processed_transcript.split()) if ai_processed_transcript else 0,
+            'is_real_transcription': is_real_transcription,
+            'transcription_source': 'OpenAI Whisper API' if is_real_transcription else 'Error - Check Configuration'
         }
+        
+        print(f"\n{'='*60}")
+        print(f"✓ Processing complete!")
+        print(f"📝 Words transcribed: {word_count}")
+        print(f"🔍 Source: {results['transcription_source']}")
+        print(f"{'='*60}\n")
         
         return jsonify({
             'success': True,
             'results': results,
-            'message': 'Enhanced video processing completed successfully'
+            'message': 'Real transcription completed' if is_real_transcription else 'Transcription failed - check configuration'
         })
             
     except Exception as e:
-        print(f"Enhanced AI processing error: {e}")
+        print(f"❌ Enhanced AI processing error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+
+# @app.route('/api/ai/enhanced-process-video', methods=['POST'])
+# def enhanced_process_video():
+#     try:
+#         if not AI_PROCESSING_AVAILABLE:
+#             return jsonify({
+#                 'error': 'AI processing not available. Install openai library.',
+#                 'available': False
+#             }), 400
+            
+#         data = request.get_json()
+#         if not data:
+#             return jsonify({'error': 'No JSON data provided'}), 400
+            
+#         video_path = data.get('video_path')
+#         if not video_path or not os.path.exists(video_path):
+#             return jsonify({'error': 'Invalid video path'}), 400
+            
+#         processor = EnhancedVideoProcessor(video_path)
+        
+#         # Extract original transcript
+#         original_transcript = processor.extract_transcript_from_audio()
+        
+#         # Process with AI
+#         ai_processed_transcript = processor.process_transcript_with_ai(original_transcript)
+        
+#         results = {
+#             'original_transcript': original_transcript,
+#             'ai_processed_transcript': ai_processed_transcript,
+#             'processing_time': 3.2,
+#             'audio_duration': 45.0,
+#             'word_count': len(original_transcript.split()) if original_transcript else 0,
+#             'ai_analysis_length': len(ai_processed_transcript.split()) if ai_processed_transcript else 0
+#         }
+        
+#         return jsonify({
+#             'success': True,
+#             'results': results,
+#             'message': 'Enhanced video processing completed successfully'
+#         })
+            
+#     except Exception as e:
+#         print(f"Enhanced AI processing error: {e}")
+#         return jsonify({'error': str(e)}), 500
 
 # Update the existing recording endpoints to use the enhanced recorder
 # Replace the start_recording function with this updated version:
@@ -1615,6 +1751,19 @@ def index():
         }
     })
 
+# CONFIG CHECK
+@app.route('/api/check-config', methods=['GET'])
+def check_config():
+    """Check if OpenAI is properly configured"""
+    return jsonify({
+        'openai_available': AI_PROCESSING_AVAILABLE,
+        'api_key_set': bool(OPENAI_API_KEY),
+        'api_key_length': len(OPENAI_API_KEY) if OPENAI_API_KEY else 0,
+        'ready_for_transcription': AI_PROCESSING_AVAILABLE and bool(OPENAI_API_KEY),
+        'message': 'Ready for real transcription!' if (AI_PROCESSING_AVAILABLE and OPENAI_API_KEY) else 'Configure OPENAI_API_KEY to enable real transcription'
+    })
+
+
 # Add a test endpoint for debugging
 @app.route('/api/test', methods=['GET', 'POST'])
 def test_endpoint():
@@ -1676,3 +1825,5 @@ if __name__ == '__main__':
     os.makedirs('uploads', exist_ok=True)
     
     app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
+
+

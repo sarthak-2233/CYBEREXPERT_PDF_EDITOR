@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Download, Pen, Highlighter, Eraser, ZoomIn, ZoomOut, RotateCcw, Video, Brain, FileText, Image, Save, Undo, Redo, Trash2, Play, Square, Settings, Eye, EyeOff, Camera, Mic, MicOff, History, Zap, MessageSquare } from 'lucide-react';
+import { Upload, Download, Pen, Highlighter, Eraser, ZoomIn, ZoomOut, RotateCcw, Video, Brain, FileText, Image, Save, Undo, Redo, Trash2, Play, Square, Settings,AlertCircle, CheckCircle ,Eye, EyeOff, Camera, Mic, MicOff, History, Zap, MessageSquare } from 'lucide-react';
 
 const API_BASE_URL = 'http://localhost:5000/api';
 
@@ -30,9 +30,19 @@ const PDFEditor = () => {
   const [screenshots, setScreenshots] = useState([]);
   const [recordingWithAudio, setRecordingWithAudio] = useState(false);
   const [originalTranscript, setOriginalTranscript] = useState('');
+  
+  
   const [aiProcessedTranscript, setAiProcessedTranscript] = useState('');
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [currentPreview, setCurrentPreview] = useState(null);
+  // New state for transcription status
+const [transcriptionStatus, setTranscriptionStatus] = useState({
+  isReal: false,
+  source: 'None',
+  hasError: false,
+  errorMessage: ''
+});
+const [apiConfigured, setApiConfigured] = useState(false);
   
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -43,7 +53,24 @@ const PDFEditor = () => {
   useEffect(() => {
     initializeSession();
   }, []);
+// Check API configuration on mount
+useEffect(() => {
+  checkApiConfiguration();
+}, []);
 
+const checkApiConfiguration = async () => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/check-config`);
+    if (response.ok) {
+      const data = await response.json();
+      setApiConfigured(data.ready_for_transcription);
+      console.log('API Configuration:', data);
+    }
+  } catch (error) {
+    console.error('Error checking API configuration:', error);
+    setApiConfigured(false);
+  }
+};
   // Canvas setup and drawing logic
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -628,40 +655,108 @@ const PDFEditor = () => {
     }
   };
 
-  const processVideoWithAI = async (videoPath) => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/ai/enhanced-process-video`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          video_path: videoPath,
-        }),
-      });
 
-      if (response.ok) {
-        const data = await response.json();
-        setOriginalTranscript(data.results.original_transcript || '');
-        setAiProcessedTranscript(data.results.ai_processed_transcript || '');
-        setAiResults(data.results);
-        setActiveTab('ai');
-      }
-    } catch (error) {
-      console.error('Error processing video:', error);
-      // Mock AI results for demo
-      const mockOriginal = "This is a simulated transcript of the screen recording session. The user reviewed the document and made several annotations highlighting key points.";
-      const mockProcessed = "**AI ANALYSIS**: The session demonstrated effective document review with strategic highlighting of critical information. Key areas of focus included implementation timelines and budget considerations.";
+
+  // const processVideoWithAI = async (videoPath) => {
+  //   try {
+  //     const response = await fetch(`${API_BASE_URL}/ai/enhanced-process-video`, {
+  //       method: 'POST',
+  //       headers: {
+  //         'Content-Type': 'application/json',
+  //       },
+  //       body: JSON.stringify({
+  //         video_path: videoPath,
+  //       }),
+  //     });
+
+  //     if (response.ok) {
+  //       const data = await response.json();
+  //       setOriginalTranscript(data.results.original_transcript || '');
+  //       setAiProcessedTranscript(data.results.ai_processed_transcript || '');
+  //       setAiResults(data.results);
+  //       setActiveTab('ai');
+  //     }
+  //   } catch (error) {
+  //     console.error('Error processing video:', error);
+  //     // Mock AI results for demo
+  //     const mockOriginal = "This is a simulated transcript of the screen recording session. The user reviewed the document and made several annotations highlighting key points.";
+  //     const mockProcessed = "**AI ANALYSIS**: The session demonstrated effective document review with strategic highlighting of critical information. Key areas of focus included implementation timelines and budget considerations.";
       
-      setOriginalTranscript(mockOriginal);
-      setAiProcessedTranscript(mockProcessed);
-      setAiResults({
-        key_points: ['Demo analysis result 1', 'Demo analysis result 2'],
-        processing_time: 2.5
+  //     setOriginalTranscript(mockOriginal);
+  //     setAiProcessedTranscript(mockProcessed);
+  //     setAiResults({
+  //       key_points: ['Demo analysis result 1', 'Demo analysis result 2'],
+  //       processing_time: 2.5
+  //     });
+  //     setActiveTab('ai');
+  //   }
+  // };
+
+  const processVideoWithAI = async (videoPath) => {
+  setProcessingVideo(true);
+  setTranscriptionStatus({
+    isReal: false,
+    source: 'Processing...',
+    hasError: false,
+    errorMessage: ''
+  });
+  
+  try {
+    const response = await fetch(`${API_BASE_URL}/ai/enhanced-process-video`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        video_path: videoPath,
+      }),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const results = data.results;
+      
+      // Check if this is a real transcription or an error
+      const isRealTranscription = results.is_real_transcription || false;
+      const hasError = results.original_transcript?.startsWith('[TRANSCRIPTION ERROR]') || false;
+      
+      setOriginalTranscript(results.original_transcript || '');
+      setAiProcessedTranscript(results.ai_processed_transcript || '');
+      setAiResults(results);
+      
+      setTranscriptionStatus({
+        isReal: isRealTranscription,
+        source: results.transcription_source || 'Unknown',
+        hasError: hasError,
+        errorMessage: hasError ? results.original_transcript : ''
       });
+      
       setActiveTab('ai');
+      
+      if (!isRealTranscription) {
+        console.warn('Transcription failed - check backend configuration');
+      }
+    } else {
+      const errorData = await response.json();
+      throw new Error(errorData.error || 'Processing failed');
     }
-  };
+  } catch (error) {
+    console.error('Error processing video:', error);
+    
+    setTranscriptionStatus({
+      isReal: false,
+      source: 'Error',
+      hasError: true,
+      errorMessage: error.message
+    });
+    
+    setOriginalTranscript(`[ERROR]\n\n${error.message}\n\nPlease check:\n1. Backend server is running\n2. OPENAI_API_KEY is configured\n3. Audio was recorded properly`);
+    setAiProcessedTranscript('Cannot analyze - transcription failed');
+    setActiveTab('ai');
+  } finally {
+    setProcessingVideo(false);
+  }
+};
 
   const saveAsImage = async () => {
     if (!sessionId) return;
@@ -899,7 +994,19 @@ const PDFEditor = () => {
                   </>
                 )}
               </button>
-              
+              {!apiConfigured && (
+  <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+    <div className="flex items-start gap-2">
+      <AlertCircle size={16} className="text-yellow-600 mt-0.5" />
+      <div className="text-xs text-yellow-800">
+        <p className="font-semibold mb-1">⚠️ OpenAI API Not Configured</p>
+        <p>Real transcription requires OpenAI API key. Configure it in the backend to enable.</p>
+      </div>
+    </div>
+  </div>
+)}
+
+
               {processingVideo && (
                 <div className="mt-3 p-3 bg-purple-50 rounded-lg border border-purple-200">
                   <div className="flex items-center gap-2 mb-2">
@@ -976,62 +1083,199 @@ const PDFEditor = () => {
           </div>
         );
 
-      case 'ai':
-        return (
-          <div className="mb-8">
-            <h3 className="text-lg font-semibold mb-4 text-gray-800 flex items-center gap-2">
-              <MessageSquare size={20} className="text-green-600" />
-              AI Transcript Analysis
-            </h3>
+      // case 'ai':
+      //   return (
+      //     <div className="mb-8">
+      //       <h3 className="text-lg font-semibold mb-4 text-gray-800 flex items-center gap-2">
+      //         <MessageSquare size={20} className="text-green-600" />
+      //         AI Transcript Analysis
+      //       </h3>
             
-            {!originalTranscript && !aiProcessedTranscript ? (
-              <div className="text-center py-8 text-gray-500">
-                <Brain size={48} className="mx-auto mb-4 opacity-30" />
-                <p>No transcript available</p>
-                <p className="text-sm">Record a session to see AI analysis</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {/* Original Transcript */}
-                <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
-                  <h4 className="font-semibold text-blue-800 mb-2 flex items-center gap-2">
-                    <Mic size={16} />
-                    Original Transcript
-                  </h4>
-                  <div className="max-h-32 overflow-y-auto">
-                    <p className="text-sm text-blue-700 whitespace-pre-wrap">
-                      {originalTranscript}
-                    </p>
-                  </div>
-                  <div className="mt-2 text-xs text-blue-600">
-                    {originalTranscript.split(' ').length} words
-                  </div>
-                </div>
+      //       {!originalTranscript && !aiProcessedTranscript ? (
+      //         <div className="text-center py-8 text-gray-500">
+      //           <Brain size={48} className="mx-auto mb-4 opacity-30" />
+      //           <p>No transcript available</p>
+      //           <p className="text-sm">Record a session to see AI analysis</p>
+      //         </div>
+      //       ) : (
+      //         <div className="space-y-4">
+      //           {/* Original Transcript */}
+      //           <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+      //             <h4 className="font-semibold text-blue-800 mb-2 flex items-center gap-2">
+      //               <Mic size={16} />
+      //               Original Transcript
+      //             </h4>
+      //             <div className="max-h-32 overflow-y-auto">
+      //               <p className="text-sm text-blue-700 whitespace-pre-wrap">
+      //                 {originalTranscript}
+      //               </p>
+      //             </div>
+      //             <div className="mt-2 text-xs text-blue-600">
+      //               {originalTranscript.split(' ').length} words
+      //             </div>
+      //           </div>
 
-                {/* AI Processed */}
-                <div className="bg-green-50 rounded-lg p-4 border border-green-200">
-                  <h4 className="font-semibold text-green-800 mb-2 flex items-center gap-2">
-                    <Zap size={16} />
-                    AI Analysis
-                  </h4>
-                  <div className="max-h-40 overflow-y-auto">
-                    <div className="text-sm text-green-700 whitespace-pre-wrap">
-                      {aiProcessedTranscript}
-                    </div>
-                  </div>
-                  {aiResults && (
-                    <div className="mt-3 pt-3 border-t border-green-200">
-                      <div className="flex items-center justify-between text-xs text-green-600">
-                        <span>Processing time: {aiResults.processing_time}s</span>
-                        <span>Key insights extracted</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
+      //           {/* AI Processed */}
+      //           <div className="bg-green-50 rounded-lg p-4 border border-green-200">
+      //             <h4 className="font-semibold text-green-800 mb-2 flex items-center gap-2">
+      //               <Zap size={16} />
+      //               AI Analysis
+      //             </h4>
+      //             <div className="max-h-40 overflow-y-auto">
+      //               <div className="text-sm text-green-700 whitespace-pre-wrap">
+      //                 {aiProcessedTranscript}
+      //               </div>
+      //             </div>
+      //             {aiResults && (
+      //               <div className="mt-3 pt-3 border-t border-green-200">
+      //                 <div className="flex items-center justify-between text-xs text-green-600">
+      //                   <span>Processing time: {aiResults.processing_time}s</span>
+      //                   <span>Key insights extracted</span>
+      //                 </div>
+      //               </div>
+      //             )}
+      //           </div>
+      //         </div>
+      //       )}
+      //     </div>
+      //   );
+
+      case 'ai':
+  return (
+    <div className="mb-8">
+      <h3 className="text-lg font-semibold mb-4 text-gray-800 flex items-center gap-2">
+        <MessageSquare size={20} className="text-green-600" />
+        AI Transcript Analysis
+      </h3>
+      
+      {!originalTranscript && !aiProcessedTranscript ? (
+        <div className="text-center py-8 text-gray-500">
+          <Brain size={48} className="mx-auto mb-4 opacity-30" />
+          <p>No transcript available</p>
+          <p className="text-sm">Record a session to see AI analysis</p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {/* Transcription Status Indicator */}
+          <div className={`p-3 rounded-lg border ${
+            transcriptionStatus.hasError 
+              ? 'bg-red-50 border-red-200' 
+              : transcriptionStatus.isReal 
+              ? 'bg-green-50 border-green-200'
+              : 'bg-yellow-50 border-yellow-200'
+          }`}>
+            <div className="flex items-center gap-2 mb-1">
+              {transcriptionStatus.hasError ? (
+                <AlertCircle size={16} className="text-red-600" />
+              ) : transcriptionStatus.isReal ? (
+                <CheckCircle size={16} className="text-green-600" />
+              ) : (
+                <AlertCircle size={16} className="text-yellow-600" />
+              )}
+              <span className={`text-sm font-semibold ${
+                transcriptionStatus.hasError 
+                  ? 'text-red-800' 
+                  : transcriptionStatus.isReal 
+                  ? 'text-green-800'
+                  : 'text-yellow-800'
+              }`}>
+                {transcriptionStatus.hasError 
+                  ? '❌ Transcription Failed' 
+                  : transcriptionStatus.isReal 
+                  ? '✓ Real Transcription' 
+                  : '⚠️ No Transcription Available'}
+              </span>
+            </div>
+            <p className={`text-xs ${
+              transcriptionStatus.hasError 
+                ? 'text-red-700' 
+                : transcriptionStatus.isReal 
+                ? 'text-green-700'
+                : 'text-yellow-700'
+            }`}>
+              Source: {transcriptionStatus.source}
+            </p>
+          </div>
+
+          {/* Original Transcript */}
+          <div className={`rounded-lg p-4 border ${
+            transcriptionStatus.hasError 
+              ? 'bg-red-50 border-red-200' 
+              : 'bg-blue-50 border-blue-200'
+          }`}>
+            <h4 className={`font-semibold mb-2 flex items-center gap-2 ${
+              transcriptionStatus.hasError ? 'text-red-800' : 'text-blue-800'
+            }`}>
+              <Mic size={16} />
+              {transcriptionStatus.hasError ? 'Transcription Error' : 'Original Transcript'}
+              {transcriptionStatus.isReal && (
+                <span className="ml-auto text-xs bg-green-500 text-white px-2 py-0.5 rounded-full">
+                  REAL
+                </span>
+              )}
+            </h4>
+            <div className="max-h-32 overflow-y-auto">
+              <p className={`text-sm whitespace-pre-wrap ${
+                transcriptionStatus.hasError ? 'text-red-700 font-mono' : 'text-blue-700'
+              }`}>
+                {originalTranscript}
+              </p>
+            </div>
+            {!transcriptionStatus.hasError && (
+              <div className="mt-2 text-xs text-blue-600">
+                {originalTranscript.split(' ').length} words transcribed
               </div>
             )}
           </div>
-        );
+
+          {/* AI Processed */}
+          {!transcriptionStatus.hasError && (
+            <div className="bg-green-50 rounded-lg p-4 border border-green-200">
+              <h4 className="font-semibold text-green-800 mb-2 flex items-center gap-2">
+                <Zap size={16} />
+                AI Analysis
+                {transcriptionStatus.isReal && (
+                  <span className="ml-auto text-xs bg-green-500 text-white px-2 py-0.5 rounded-full">
+                    POWERED BY GPT-4
+                  </span>
+                )}
+              </h4>
+              <div className="max-h-40 overflow-y-auto">
+                <div className="text-sm text-green-700 whitespace-pre-wrap">
+                  {aiProcessedTranscript}
+                </div>
+              </div>
+              {aiResults && (
+                <div className="mt-3 pt-3 border-t border-green-200">
+                  <div className="flex items-center justify-between text-xs text-green-600">
+                    <span>Processing time: {aiResults.processing_time}s</span>
+                    <span>
+                      {transcriptionStatus.isReal ? 'Real AI insights' : 'Limited analysis'}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* Help text for errors */}
+          {transcriptionStatus.hasError && (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+              <h5 className="text-sm font-semibold text-blue-800 mb-2">
+                How to Enable Real Transcription:
+              </h5>
+              <ol className="text-xs text-blue-700 space-y-1 list-decimal list-inside">
+                <li>Get an OpenAI API key from platform.openai.com</li>
+                <li>Set environment variable: export OPENAI_API_KEY='your-key'</li>
+                <li>Restart the backend server</li>
+                <li>Record a new session with audio enabled</li>
+              </ol>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 
       default:
         return null;
