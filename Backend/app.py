@@ -66,7 +66,7 @@ CORS(app, origins=["*"])  # Enable CORS for React frontend
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 300 * 1024 * 1024  # 300MB max file size
 
-# OpenAI API Key (keep this secure - use environment variable)
+# api key
 OPENAI_API_KEY = ''
 
 # Ensure upload directory exists
